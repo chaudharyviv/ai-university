@@ -4,9 +4,10 @@ A multi-agent system that generates full educational courses — curriculum,
 Jupyter notebooks, slides, quizzes, and assignments — using specialized LLM
 agents with real tool use and live observability.
 
-> **Status: Phase 1 (Foundation)** — project skeleton, config, logging,
-> orchestrator stub, and a working Streamlit shell are in place. Specialized
-> agents (Persona, Research, Curriculum, Notebook, ...) land in Phase 2.
+> **Status: Phase 6 (Advanced, trimmed)** — full agent pipeline (Persona →
+> Research → Curriculum → per-lesson content agents → Reviewer), `.ipynb` +
+> `.pptx` export, and automatic Anthropic ↔ OpenAI provider failover are all
+> in place. See [Roadmap](#roadmap) for what's built vs. cut from scope.
 
 ## Why
 
@@ -30,20 +31,34 @@ orchestrator, with cost/token tracking and a real UI to watch it run.
 
 ```text
 ai-university/
-├── app.py                  # Streamlit entry point
-├── config.py                # Typed settings (env-driven)
-├── pages/                   # Streamlit multipage UI
+├── app.py                    # Streamlit entry point
+├── config.py                  # Typed settings (env-driven)
+├── pages/                     # Streamlit multipage UI
 ├── agents/
-│   ├── base.py               # Shared agent base class + registry
-│   └── orchestrator.py       # Runs a named sequence of agents
+│   ├── base.py                 # Shared agent base class, model resolution, provider failover
+│   ├── orchestrator.py         # Runs a named sequence of agents
+│   ├── persona_agent.py        # Learner persona from a topic
+│   ├── research_agent.py       # Web-search-backed research brief (smolagents ToolCallingAgent)
+│   ├── curriculum_agent.py     # Course outline / lesson list
+│   ├── lesson_agent_base.py    # Shared base for per-lesson content agents
+│   ├── code_agent.py           # Runnable code examples
+│   ├── diagram_agent.py        # Mermaid/diagram generation
+│   ├── quiz_agent.py           # Quiz questions
+│   ├── assignment_agent.py     # Assignments
+│   ├── speaker_notes_agent.py  # Slide speaker notes
+│   ├── notebook_agent.py       # Assembles lesson content into a notebook draft
+│   └── reviewer_agent.py       # Reject/revise loop (REVIEW_MAX_ATTEMPTS)
 ├── tools/
-│   ├── filesystem.py         # Per-run workspace management
-│   └── search.py              # Web search (Phase 1 stub)
+│   ├── filesystem.py           # Per-run workspace management
+│   ├── search.py                # Web search tool used by ResearchAgent
+│   ├── export.py                 # Orchestrates run export, zips per-run outputs
+│   ├── notebook_export.py       # Builds a real .ipynb via nbformat
+│   └── pptx_export.py            # Builds real slides via python-pptx
+├── models/
+│   └── schemas.py             # Pydantic I/O schemas shared across agents
+├── prompts/                   # Versioned system prompts, one module per agent
 ├── utils/
-│   └── logging_config.py     # Centralized loguru setup
-├── models/                   # Pydantic I/O schemas (Phase 2+)
-├── prompts/                  # Versioned system prompts (Phase 2+)
-├── templates/                # Jinja/Markdown templates (Phase 2+)
+│   └── logging_config.py      # Centralized loguru setup
 ├── tests/
 ├── Dockerfile
 ├── docker-compose.yml
