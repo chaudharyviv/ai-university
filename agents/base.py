@@ -115,6 +115,15 @@ class BaseAgent(ABC):
     def __init__(self) -> None:
         settings.validate_at_least_one_provider()
 
+    def _provider_available(self, model: str) -> bool:
+        """True if we have credentials for the provider prefix of a LiteLLM model id."""
+        provider = model.split("/", 1)[0]
+        if provider == "anthropic":
+            return settings.has_anthropic
+        if provider == "openai":
+            return settings.has_openai
+        return True
+
     def _resolve_model(self) -> str:
         """Pick which model this agent should call, given configured keys."""
         model = self.preferred_model or settings.primary_model
@@ -136,6 +145,24 @@ class BaseAgent(ABC):
             model = settings.fallback_model
 
         return model
+
+    def _models_for_failover(self) -> list[str]:
+        """
+        Ordered models to try: resolved primary, then fallback if it differs
+        and we actually have credentials for that provider.
+        """
+        primary_model = self._resolve_model()
+        attempt_models = [primary_model]
+        fallback = settings.fallback_model
+        if fallback != primary_model and self._provider_available(fallback):
+            attempt_models.append(fallback)
+        elif fallback != primary_model:
+            logger.warning(
+                "{}: skipping failover to {} - provider credentials not configured",
+                self.name,
+                fallback,
+            )
+        return attempt_models
 
     @abstractmethod
     def build_user_prompt(self, **kwargs: Any) -> str:
@@ -167,10 +194,7 @@ class BaseAgent(ABC):
             logger.exception("{} failed building prompt after {:.2f}s: {}", self.name, elapsed, exc)
             return AgentResult(agent_name=self.name, success=False, error=str(exc), latency_seconds=elapsed)
 
-        primary_model = self._resolve_model()
-        attempt_models = [primary_model]
-        if settings.fallback_model != primary_model:
-            attempt_models.append(settings.fallback_model)
+        attempt_models = self._models_for_failover()
 
         last_exc: Exception | None = None
         for i, model in enumerate(attempt_models):

@@ -180,3 +180,13 @@ def test_export_run_skips_notebook_without_notebook_output(tmp_path, monkeypatch
         names = zf.namelist()
     assert "course.ipynb" not in names
     assert "course_slides.pptx" in names
+
+
+@pytest.mark.parametrize(
+    "bad_run_id",
+    ["../escape", "..\\escape", "foo/bar", "foo\\bar", "", "has spaces", "a" * 200],
+)
+def test_export_run_rejects_unsafe_run_id(tmp_path, monkeypatch, sample_course, bad_run_id):
+    monkeypatch.setattr("tools.export.settings.outputs_dir", tmp_path)
+    with pytest.raises(ValueError, match="run_id"):
+        export_run(bad_run_id, {"curriculum": sample_course})
