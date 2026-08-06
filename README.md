@@ -81,11 +81,13 @@ pytest --cov=.
 ## Roadmap
 
 - [x] **Phase 1 — Foundation**: skeleton, config, logging, orchestrator stub, Streamlit shell, Docker, CI
-- [ ] **Phase 2 — Core Agents**: Persona → Research → Curriculum → Notebook
-- [ ] **Phase 3 — Content Generation**: Code, Diagram, Quiz, Assignment, Speaker Notes agents
-- [ ] **Phase 4 — Quality & Validation**: Reviewer agent, notebook execution checks
-- [ ] **Phase 5 — Export Pipeline**: PPTX, DOCX, PDF, Notebook, ZIP packaging
-- [ ] **Phase 6 — Advanced**: multi-LLM routing strategies, plugin system, deeper test coverage
+- [x] **Phase 2 — Core Agents**: Persona → Research → Curriculum → Notebook (Research built on smolagents `ToolCallingAgent`)
+- [x] **Phase 3 — Content Generation**: Code, Diagram, Quiz, Assignment, Speaker Notes agents
+- [x] **Phase 4 — Quality & Validation**: Reviewer agent loop (reject/revise up to `REVIEW_MAX_ATTEMPTS`)
+- [x] **Phase 5 — Export Pipeline**: real `.ipynb` (nbformat) + `.pptx` (python-pptx) export, zipped per run
+- [x] **Phase 6 — Advanced (trimmed)**: automatic provider failover (Anthropic ↔ OpenAI on API error), CI, test suite
+
+Not built (cut from original scope to keep this a focused portfolio project rather than a production system): DOCX/PDF export, persistent run memory/resume, a plugin system, and multi-lesson looping (agents currently generate rich content for lesson 1 of the curriculum; every other lesson gets title + objectives only).
 
 ## License
 

@@ -75,6 +75,7 @@ class PipelineRun:
     total_cost_usd: float = 0.0
     stopped_early: bool = False
     stop_reason: str | None = None
+    context: dict[str, Any] = field(default_factory=dict)
 
     @property
     def success(self) -> bool:
@@ -151,6 +152,8 @@ class Orchestrator:
                 break
 
             context[agent_name] = result.output
+
+        run.context = context
 
         logger.info(
             "Pipeline run {} finished. success={} total_cost=${:.4f}",

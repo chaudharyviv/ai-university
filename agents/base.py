@@ -147,22 +147,65 @@ class BaseAgent(ABC):
         Execute this agent: build the prompt, call the model via LiteLLM,
         and return a uniform AgentResult. Never raises - errors are
         captured in the result so the Orchestrator can decide how to react.
+
+        Provider failover (Phase 6): if the call to the primary model
+        itself fails (rate limit, timeout, auth error, provider outage -
+        anything litellm.completion raises), this automatically retries
+        once against settings.fallback_model before giving up. This is
+        separate from response_model validation failures (bad JSON from
+        a model that DID respond) - those are not retried against a
+        different model, since a formatting mistake isn't a provider
+        problem and retrying it against a second model just doubles cost
+        for the same likely outcome.
         """
-        model = self._resolve_model()
         start = time.monotonic()
 
         try:
             user_prompt = self.build_user_prompt(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - bad/missing context, not a model problem
+            elapsed = time.monotonic() - start
+            logger.exception("{} failed building prompt after {:.2f}s: {}", self.name, elapsed, exc)
+            return AgentResult(agent_name=self.name, success=False, error=str(exc), latency_seconds=elapsed)
 
-            response = litellm.completion(
-                model=model,
-                messages=[
-                    {"role": "system", "content": self.system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=settings.max_tokens,
-            )
+        primary_model = self._resolve_model()
+        attempt_models = [primary_model]
+        if settings.fallback_model != primary_model:
+            attempt_models.append(settings.fallback_model)
 
+        last_exc: Exception | None = None
+        for i, model in enumerate(attempt_models):
+            try:
+                response = litellm.completion(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": self.system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=settings.max_tokens,
+                )
+            except Exception as exc:  # noqa: BLE001 - provider/network error, eligible for failover
+                last_exc = exc
+                is_last_attempt = i == len(attempt_models) - 1
+                if is_last_attempt:
+                    elapsed = time.monotonic() - start
+                    logger.exception(
+                        "{} failed after {:.2f}s - all models exhausted ({}): {}",
+                        self.name,
+                        elapsed,
+                        attempt_models,
+                        exc,
+                    )
+                    return AgentResult(
+                        agent_name=self.name, success=False, error=str(exc), model_used=model, latency_seconds=elapsed
+                    )
+                logger.warning(
+                    "{}: {} failed ({}), failing over to {}", self.name, model, exc, attempt_models[i + 1]
+                )
+                continue
+
+            # Got a response - handle success/parsing here rather than
+            # retrying against another model. A response that fails schema
+            # validation is a formatting problem, not a provider problem.
             elapsed = time.monotonic() - start
             usage = getattr(response, "usage", None)
             input_tokens = getattr(usage, "prompt_tokens", 0) or 0
@@ -200,6 +243,9 @@ class BaseAgent(ABC):
                         metadata={"raw_output": content},
                     )
 
+            if i > 0:
+                logger.info("{}: succeeded on fallback model {} after primary failed", self.name, model)
+
             logger.info(
                 "{} completed in {:.2f}s (model={}, tokens={}+{}, cost=${:.4f})",
                 self.name,
@@ -219,15 +265,16 @@ class BaseAgent(ABC):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 estimated_cost_usd=cost,
+                metadata={"failed_over": i > 0},
             )
 
-        except Exception as exc:  # noqa: BLE001 - convert to AgentResult, don't crash the run
-            elapsed = time.monotonic() - start
-            logger.exception("{} failed after {:.2f}s: {}", self.name, elapsed, exc)
-            return AgentResult(
-                agent_name=self.name,
-                success=False,
-                error=str(exc),
-                model_used=model,
-                latency_seconds=elapsed,
-            )
+        # Unreachable in practice (the loop above always returns or raises
+        # via the last-attempt branch), but keeps type checkers happy and
+        # fails loudly instead of silently returning None if that ever changes.
+        elapsed = time.monotonic() - start
+        return AgentResult(
+            agent_name=self.name,
+            success=False,
+            error=str(last_exc) if last_exc else "No model attempts were made",
+            latency_seconds=elapsed,
+        )

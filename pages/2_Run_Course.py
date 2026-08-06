@@ -6,6 +6,7 @@ import agents  # noqa: F401 - triggers agent registration
 from agents.base import list_registered_agents
 from agents.orchestrator import REVIEWABLE_AGENTS, Orchestrator, sort_by_pipeline_order
 from config import settings
+from tools.export import export_run
 
 st.set_page_config(page_title="Run Course", page_icon="▶️", layout="wide")
 st.title("▶️ Run Course")
@@ -52,13 +53,20 @@ if st.button("Run pipeline", type="primary", disabled=not (topic and selected_ag
             initial_context={"topic": topic},
             enable_review=enable_review,
         )
+    # Stored in session_state (not a local var) so the export section below
+    # survives the rerun that happens when its own button is clicked.
+    st.session_state["last_run"] = run
+    st.session_state.pop("export_zip", None)  # stale export from a prior run
 
-    if run.success:
-        st.success(f"Run {run.run_id} completed. Total cost: ${run.total_cost_usd:.4f}")
+last_run = st.session_state.get("last_run")
+
+if last_run is not None:
+    if last_run.success:
+        st.success(f"Run {last_run.run_id} completed. Total cost: ${last_run.total_cost_usd:.4f}")
     else:
-        st.error(f"Run {run.run_id} stopped early: {run.stop_reason}")
+        st.error(f"Run {last_run.run_id} stopped early: {last_run.stop_reason}")
 
-    for result in run.results:
+    for result in last_run.results:
         with st.expander(f"{result.agent_name} — {'✅' if result.success else '❌'}"):
             st.write(f"Model: `{result.model_used}`")
             st.write(f"Latency: {result.latency_seconds:.2f}s")
@@ -78,3 +86,28 @@ if st.button("Run pipeline", type="primary", disabled=not (topic and selected_ag
                 st.error(result.error)
             else:
                 st.write(result.output)
+
+    st.divider()
+    st.subheader("📦 Export (Phase 5)")
+
+    if "curriculum" not in last_run.context:
+        st.info("Run the curriculum agent (and ideally notebook/code/diagram/quiz/assignment) to enable export.")
+    else:
+        if st.button("Generate course.ipynb + slides.pptx"):
+            with st.spinner("Building notebook and slide deck..."):
+                try:
+                    zip_path = export_run(last_run.run_id, last_run.context)
+                    st.session_state["export_zip"] = zip_path
+                except Exception as exc:  # noqa: BLE001 - surface any export failure in the UI
+                    st.error(f"Export failed: {exc}")
+
+        export_zip = st.session_state.get("export_zip")
+        if export_zip and export_zip.exists():
+            with open(export_zip, "rb") as f:
+                st.download_button(
+                    "⬇️ Download course materials (.zip)",
+                    f,
+                    file_name=export_zip.name,
+                    mime="application/zip",
+                )
+            st.caption("Contains course.ipynb and course_slides.pptx")
