@@ -1,0 +1,28 @@
+# Environment / secrets
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# App data (per-run scratch and generated artifacts - not source)
+workspace/*
+!workspace/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.db
+
+# OS
+.DS_Store
+
+# Streamlit
+.streamlit/secrets.toml

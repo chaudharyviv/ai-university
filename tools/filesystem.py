@@ -1,0 +1,71 @@
+"""
+Filesystem tool: manages the per-run workspace directory.
+
+Every course-generation run gets its own subdirectory under
+`settings.workspace_dir`, keyed by a run_id, so concurrent/past runs
+never collide and cleanup is a single `rm -rf <run_dir>`.
+"""
+
+from __future__ import annotations
+
+import shutil
+import uuid
+from pathlib import Path
+
+from loguru import logger
+
+from config import settings
+
+
+def new_run_id() -> str:
+    """Generate a short, sortable-ish run identifier."""
+    return uuid.uuid4().hex[:12]
+
+
+def get_run_dir(run_id: str, create: bool = True) -> Path:
+    """
+    Return the workspace directory for a given run_id.
+
+    Args:
+        run_id: identifier returned by `new_run_id()`.
+        create: if True, create the directory (and parents) if missing.
+    """
+    run_dir = settings.workspace_dir / run_id
+    if create:
+        run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+
+def write_text_file(run_id: str, relative_path: str, content: str) -> Path:
+    """
+    Write a text file inside a run's workspace.
+
+    `relative_path` may include subdirectories (e.g. "notebooks/lesson1.ipynb");
+    they are created as needed. Refuses to write outside the run directory.
+    """
+    run_dir = get_run_dir(run_id)
+    target = (run_dir / relative_path).resolve()
+
+    if run_dir.resolve() not in target.parents and target != run_dir.resolve():
+        raise ValueError(f"Refusing to write outside run directory: {relative_path!r}")
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content, encoding="utf-8")
+    logger.debug("Wrote {} bytes to {}", len(content), target)
+    return target
+
+
+def list_run_files(run_id: str) -> list[Path]:
+    """List all files (not directories) currently in a run's workspace."""
+    run_dir = get_run_dir(run_id, create=False)
+    if not run_dir.exists():
+        return []
+    return sorted(p for p in run_dir.rglob("*") if p.is_file())
+
+
+def cleanup_run(run_id: str) -> None:
+    """Delete a run's entire workspace directory. Irreversible."""
+    run_dir = get_run_dir(run_id, create=False)
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+        logger.info("Cleaned up run workspace: {}", run_id)

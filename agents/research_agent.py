@@ -1,0 +1,156 @@
+"""
+Research agent - the first agent in the pipeline that actually uses
+tool-calling rather than a single completion, so it's built on
+smolagents directly instead of BaseAgent's plain litellm call.
+
+This is deliberately the proof point for "does smolagents work in this
+project": if this agent runs and calls web_search, the orchestration
+layer is validated end to end.
+"""
+
+from __future__ import annotations
+
+import time
+from typing import Any
+
+from loguru import logger
+from smolagents import LiteLLMModel, ToolCallingAgent, tool
+
+from agents.base import AgentResult, BaseAgent, register_agent
+from config import settings
+from models.schemas import ResearchBrief
+from prompts.research_prompt import RESEARCH_SYSTEM_PROMPT
+from tools.search import web_search as _web_search_impl
+from utils.json_parsing import extract_json
+
+
+@tool
+def web_search(query: str, max_results: int = 5) -> str:
+    """
+    Search the web for a query and return the results.
+
+    Args:
+        query: the search query.
+        max_results: maximum number of results to return.
+
+    Returns:
+        A formatted string of search results (title, url, snippet per result).
+    """
+    results = _web_search_impl(query, max_results=max_results)
+    if not results:
+        return "No results found."
+    return "\n\n".join(f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}" for r in results)
+
+
+@register_agent("research")
+class ResearchAgent(BaseAgent):
+    """
+    Overrides run() entirely (rather than build_user_prompt only) because
+    it delegates execution to a smolagents ToolCallingAgent instead of a
+    single litellm.completion call.
+    """
+
+    name = "research"
+    system_prompt = RESEARCH_SYSTEM_PROMPT
+    response_model = ResearchBrief
+
+    def build_user_prompt(self, **kwargs: Any) -> str:
+        persona = kwargs.get("persona")
+        topic = kwargs.get("topic")
+        if not topic:
+            raise ValueError("ResearchAgent requires a 'topic' in context")
+
+        prompt = f"Research this course topic: {topic}"
+        if persona is not None:
+            prompt += f"\n\nTarget audience: {persona.audience_level}"
+        return prompt
+
+    def run(self, **kwargs: Any) -> AgentResult:
+        model_id = self._resolve_model()
+        start = time.monotonic()
+
+        try:
+            user_prompt = self.build_user_prompt(**kwargs)
+
+            llm = LiteLLMModel(model_id=model_id, max_tokens=settings.max_tokens)
+            smol_agent = ToolCallingAgent(
+                tools=[web_search],
+                model=llm,
+                max_steps=6,
+                instructions=self.system_prompt,
+            )
+
+            raw_result = smol_agent.run(user_prompt)
+            elapsed = time.monotonic() - start
+
+            token_usage = smol_agent.monitor.get_total_token_counts()
+            input_tokens = token_usage.input_tokens
+            output_tokens = token_usage.output_tokens
+
+            # smolagents doesn't compute cost itself; estimate via litellm
+            # using the same per-token pricing table the rest of the app uses.
+            try:
+                import litellm
+
+                cost = litellm.cost_per_token(
+                    model=model_id.split("/", 1)[-1],
+                    prompt_tokens=input_tokens,
+                    completion_tokens=output_tokens,
+                )
+                estimated_cost = sum(cost) if isinstance(cost, tuple) else 0.0
+            except Exception:  # noqa: BLE001 - cost estimation is best-effort
+                estimated_cost = 0.0
+
+            try:
+                parsed_dict = extract_json(str(raw_result))
+                output = self.response_model.model_validate(parsed_dict)
+            except Exception as parse_exc:  # noqa: BLE001
+                logger.warning(
+                    "{}: smolagents output failed schema validation: {}\nRaw: {}",
+                    self.name,
+                    parse_exc,
+                    raw_result,
+                )
+                return AgentResult(
+                    agent_name=self.name,
+                    success=False,
+                    error=f"Output failed ResearchBrief validation: {parse_exc}",
+                    model_used=model_id,
+                    latency_seconds=elapsed,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    estimated_cost_usd=estimated_cost,
+                    metadata={"raw_output": str(raw_result)},
+                )
+
+            logger.info(
+                "{} completed in {:.2f}s (model={}, tokens={}+{}, cost=${:.4f})",
+                self.name,
+                elapsed,
+                model_id,
+                input_tokens,
+                output_tokens,
+                estimated_cost,
+            )
+
+            return AgentResult(
+                agent_name=self.name,
+                success=True,
+                output=output,
+                model_used=model_id,
+                latency_seconds=elapsed,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                estimated_cost_usd=estimated_cost,
+            )
+
+        except Exception as exc:  # noqa: BLE001
+            elapsed = time.monotonic() - start
+            logger.exception("{} failed after {:.2f}s: {}", self.name, elapsed, exc)
+            return AgentResult(
+                agent_name=self.name,
+                success=False,
+                error=str(exc),
+                model_used=model_id,
+                latency_seconds=elapsed,
+            )

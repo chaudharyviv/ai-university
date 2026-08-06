@@ -1,0 +1,11 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      - ./workspace:/app/workspace
+      - ./outputs:/app/outputs
+    restart: unless-stopped
