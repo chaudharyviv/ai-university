@@ -3,16 +3,36 @@ Tests for Phase 6's provider failover: if the primary model's completion
 call itself raises (rate limit, timeout, outage), BaseAgent.run() should
 automatically retry once against settings.fallback_model rather than
 failing the whole agent - without ever making a real network call.
+
+These tests monkeypatch settings attributes directly (not just env vars)
+because `config.settings` is a singleton constructed at import time;
+monkeypatch.setenv alone does not refresh pydantic-settings fields and
+would make CI (Anthropic-only) diverge from local .env-with-both-keys.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
 from agents.persona_agent import PersonaAgent
+from agents.research_agent import ResearchAgent
 from config import settings
+
+
+PRIMARY = "openai/gpt-4o-mini"
+FALLBACK = "anthropic/claude-sonnet-4-5"
+
+
+@pytest.fixture
+def both_providers(monkeypatch):
+    """Deterministic two-provider routing, independent of CI/.env keys."""
+    monkeypatch.setattr(settings, "primary_model", PRIMARY)
+    monkeypatch.setattr(settings, "fallback_model", FALLBACK)
+    monkeypatch.setattr(type(settings), "has_openai", property(lambda self: True))
+    monkeypatch.setattr(type(settings), "has_anthropic", property(lambda self: True))
 
 
 def _fake_response(content: str):
@@ -28,16 +48,19 @@ VALID_PERSONA_JSON = (
     '"prerequisites": [], "learning_goals": ["understand basics"]}'
 )
 
+VALID_RESEARCH_JSON = (
+    '{"topic": "Rust", '
+    '"findings": [{"title": "Book", "url": "https://example.com", "key_points": ["ownership"]}], '
+    '"summary": "practical intro"}'
+)
 
-def test_run_falls_back_to_second_model_when_primary_raises(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
+def test_run_falls_back_to_second_model_when_primary_raises(both_providers, monkeypatch):
     calls: list[str] = []
 
     def fake_completion(model, messages, max_tokens):
         calls.append(model)
-        if model == settings.primary_model:
+        if model == PRIMARY:
             raise RuntimeError("simulated provider outage")
         return _fake_response(VALID_PERSONA_JSON)
 
@@ -48,15 +71,12 @@ def test_run_falls_back_to_second_model_when_primary_raises(monkeypatch):
     result = agent.run(topic="Intro to Rust")
 
     assert result.success is True
-    assert calls == [settings.primary_model, settings.fallback_model]
-    assert result.model_used == settings.fallback_model
+    assert calls == [PRIMARY, FALLBACK]
+    assert result.model_used == FALLBACK
     assert result.metadata.get("failed_over") is True
 
 
-def test_run_succeeds_on_primary_without_touching_fallback(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
+def test_run_succeeds_on_primary_without_touching_fallback(both_providers, monkeypatch):
     calls: list[str] = []
 
     def fake_completion(model, messages, max_tokens):
@@ -70,15 +90,12 @@ def test_run_succeeds_on_primary_without_touching_fallback(monkeypatch):
     result = agent.run(topic="Intro to Rust")
 
     assert result.success is True
-    assert calls == [settings.primary_model]
-    assert result.model_used == settings.primary_model
+    assert calls == [PRIMARY]
+    assert result.model_used == PRIMARY
     assert result.metadata.get("failed_over") is False
 
 
-def test_run_fails_cleanly_when_both_models_raise(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
+def test_run_fails_cleanly_when_both_models_raise(both_providers, monkeypatch):
     def fake_completion(model, messages, max_tokens):
         raise RuntimeError(f"simulated outage on {model}")
 
@@ -89,15 +106,12 @@ def test_run_fails_cleanly_when_both_models_raise(monkeypatch):
 
     assert result.success is False
     assert "simulated outage" in result.error
-    assert result.model_used == settings.fallback_model  # the last attempted model
+    assert result.model_used == FALLBACK  # the last attempted model
 
 
-def test_schema_validation_failure_does_not_trigger_failover(monkeypatch):
+def test_schema_validation_failure_does_not_trigger_failover(both_providers, monkeypatch):
     # A model that responds with garbage JSON is a formatting problem, not
     # a provider problem - should NOT retry against the fallback model.
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
-
     calls: list[str] = []
 
     def fake_completion(model, messages, max_tokens):
@@ -112,12 +126,10 @@ def test_schema_validation_failure_does_not_trigger_failover(monkeypatch):
 
     assert result.success is False
     assert "validation" in result.error
-    assert calls == [settings.primary_model]  # only one attempt, no failover
+    assert calls == [PRIMARY]  # only one attempt, no failover
 
 
-def test_prompt_building_failure_never_calls_the_model(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
-
+def test_prompt_building_failure_never_calls_the_model(both_providers, monkeypatch):
     def fake_completion(*args, **kwargs):
         pytest.fail("litellm.completion should never be called when prompt-building fails")
 
@@ -128,3 +140,59 @@ def test_prompt_building_failure_never_calls_the_model(monkeypatch):
 
     assert result.success is False
     assert "topic" in result.error
+
+
+def test_failover_skipped_when_fallback_provider_has_no_credentials(monkeypatch):
+    """Don't burn a second call when the fallback key isn't configured."""
+    monkeypatch.setattr(settings, "primary_model", PRIMARY)
+    monkeypatch.setattr(settings, "fallback_model", FALLBACK)
+    monkeypatch.setattr(type(settings), "has_openai", property(lambda self: True))
+    monkeypatch.setattr(type(settings), "has_anthropic", property(lambda self: False))
+
+    calls: list[str] = []
+
+    def fake_completion(model, messages, max_tokens):
+        calls.append(model)
+        raise RuntimeError("simulated primary outage")
+
+    monkeypatch.setattr("agents.base.litellm.completion", fake_completion)
+
+    agent = PersonaAgent()
+    result = agent.run(topic="Intro to Rust")
+
+    assert result.success is False
+    assert calls == [PRIMARY]
+    assert result.model_used == PRIMARY
+
+
+def test_research_agent_falls_back_when_primary_raises(both_providers, monkeypatch):
+    models_used: list[str] = []
+
+    class FakeLiteLLMModel:
+        def __init__(self, model_id, max_tokens=None):
+            models_used.append(model_id)
+            self.model_id = model_id
+
+    class FakeToolCallingAgent:
+        def __init__(self, tools, model, max_steps, instructions):
+            self.model = model
+            self.monitor = MagicMock()
+            self.monitor.get_total_token_counts.return_value = SimpleNamespace(
+                input_tokens=5, output_tokens=10
+            )
+
+        def run(self, prompt):
+            if self.model.model_id == PRIMARY:
+                raise RuntimeError("simulated research provider outage")
+            return VALID_RESEARCH_JSON
+
+    monkeypatch.setattr("agents.research_agent.LiteLLMModel", FakeLiteLLMModel)
+    monkeypatch.setattr("agents.research_agent.ToolCallingAgent", FakeToolCallingAgent)
+
+    agent = ResearchAgent()
+    result = agent.run(topic="Rust")
+
+    assert result.success is True
+    assert models_used == [PRIMARY, FALLBACK]
+    assert result.model_used == FALLBACK
+    assert result.metadata.get("failed_over") is True

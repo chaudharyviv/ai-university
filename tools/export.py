@@ -11,6 +11,7 @@ step itself.
 
 from __future__ import annotations
 
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,18 @@ from loguru import logger
 from config import settings
 from tools.notebook_export import build_notebook, export_notebook_to_file
 from tools.pptx_export import LessonExtras, build_pptx, export_pptx_to_file
+
+# Matches uuid.hex[:12]-style ids from the UI; rejects path separators / traversal.
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_run_id(run_id: str) -> str:
+    if not _SAFE_RUN_ID.fullmatch(run_id):
+        raise ValueError(
+            f"Invalid run_id {run_id!r}: must be 1-64 chars of [A-Za-z0-9_-] "
+            "(no path separators or '..')"
+        )
+    return run_id
 
 
 def export_run(run_id: str, context: dict[str, Any]) -> Path:
@@ -32,11 +45,16 @@ def export_run(run_id: str, context: dict[str, Any]) -> Path:
     output (a CourseOutline from the curriculum agent) - export can't do
     anything meaningful without at least that.
     """
+    run_id = _validate_run_id(run_id)
+
     course = context.get("curriculum")
     if course is None:
         raise ValueError("Cannot export: no 'curriculum' output in context (run the curriculum agent first)")
 
-    run_dir = settings.outputs_dir / run_id
+    outputs_root = settings.outputs_dir.resolve()
+    run_dir = (settings.outputs_dir / run_id).resolve()
+    if outputs_root not in run_dir.parents and run_dir != outputs_root:
+        raise ValueError(f"Invalid run_id {run_id!r}: path escapes outputs directory")
     run_dir.mkdir(parents=True, exist_ok=True)
 
     notebook_draft = context.get("notebook")

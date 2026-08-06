@@ -48,6 +48,10 @@ class ResearchAgent(BaseAgent):
     Overrides run() entirely (rather than build_user_prompt only) because
     it delegates execution to a smolagents ToolCallingAgent instead of a
     single litellm.completion call.
+
+    Provider failover mirrors BaseAgent: retry once on a different model
+    when the smolagents run itself raises (provider/network), but not when
+    the response fails ResearchBrief schema validation.
     """
 
     name = "research"
@@ -66,23 +70,59 @@ class ResearchAgent(BaseAgent):
         return prompt
 
     def run(self, **kwargs: Any) -> AgentResult:
-        model_id = self._resolve_model()
         start = time.monotonic()
 
         try:
             user_prompt = self.build_user_prompt(**kwargs)
-
-            llm = LiteLLMModel(model_id=model_id, max_tokens=settings.max_tokens)
-            smol_agent = ToolCallingAgent(
-                tools=[web_search],
-                model=llm,
-                max_steps=6,
-                instructions=self.system_prompt,
-            )
-
-            raw_result = smol_agent.run(user_prompt)
+        except Exception as exc:  # noqa: BLE001 - bad/missing context, not a model problem
             elapsed = time.monotonic() - start
+            logger.exception("{} failed building prompt after {:.2f}s: {}", self.name, elapsed, exc)
+            return AgentResult(agent_name=self.name, success=False, error=str(exc), latency_seconds=elapsed)
 
+        attempt_models = self._models_for_failover()
+        last_exc: Exception | None = None
+
+        for i, model_id in enumerate(attempt_models):
+            try:
+                llm = LiteLLMModel(model_id=model_id, max_tokens=settings.max_tokens)
+                smol_agent = ToolCallingAgent(
+                    tools=[web_search],
+                    model=llm,
+                    max_steps=6,
+                    instructions=self.system_prompt,
+                )
+
+                raw_result = smol_agent.run(user_prompt)
+            except Exception as exc:  # noqa: BLE001 - provider/network error, eligible for failover
+                last_exc = exc
+                is_last_attempt = i == len(attempt_models) - 1
+                if is_last_attempt:
+                    elapsed = time.monotonic() - start
+                    logger.exception(
+                        "{} failed after {:.2f}s - all models exhausted ({}): {}",
+                        self.name,
+                        elapsed,
+                        attempt_models,
+                        exc,
+                    )
+                    return AgentResult(
+                        agent_name=self.name,
+                        success=False,
+                        error=str(exc),
+                        model_used=model_id,
+                        latency_seconds=elapsed,
+                    )
+                logger.warning(
+                    "{}: {} failed ({}), failing over to {}",
+                    self.name,
+                    model_id,
+                    exc,
+                    attempt_models[i + 1],
+                )
+                continue
+
+            # Got a response - parse/validate here; do not failover on schema errors.
+            elapsed = time.monotonic() - start
             token_usage = smol_agent.monitor.get_total_token_counts()
             input_tokens = token_usage.input_tokens
             output_tokens = token_usage.output_tokens
@@ -120,8 +160,11 @@ class ResearchAgent(BaseAgent):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     estimated_cost_usd=estimated_cost,
-                    metadata={"raw_output": str(raw_result)},
+                    metadata={"raw_output": str(raw_result), "failed_over": i > 0},
                 )
+
+            if i > 0:
+                logger.info("{}: succeeded on fallback model {} after primary failed", self.name, model_id)
 
             logger.info(
                 "{} completed in {:.2f}s (model={}, tokens={}+{}, cost=${:.4f})",
@@ -142,15 +185,13 @@ class ResearchAgent(BaseAgent):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 estimated_cost_usd=estimated_cost,
+                metadata={"failed_over": i > 0},
             )
 
-        except Exception as exc:  # noqa: BLE001
-            elapsed = time.monotonic() - start
-            logger.exception("{} failed after {:.2f}s: {}", self.name, elapsed, exc)
-            return AgentResult(
-                agent_name=self.name,
-                success=False,
-                error=str(exc),
-                model_used=model_id,
-                latency_seconds=elapsed,
-            )
+        elapsed = time.monotonic() - start
+        return AgentResult(
+            agent_name=self.name,
+            success=False,
+            error=str(last_exc) if last_exc else "No model attempts were made",
+            latency_seconds=elapsed,
+        )
