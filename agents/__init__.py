@@ -5,7 +5,7 @@ and `list_registered_agents` work without callers needing to know which
 modules exist. Add new agent modules to this list as they're built.
 """
 
-from agents import (  # noqa: F401 - imported for registration side effects
+from agents import (  
     assignment_agent,
     code_agent,
     curriculum_agent,
