@@ -26,9 +26,5 @@ nbformat>=5.10
 # python-docx>=1.1
 # weasyprint>=62.0
 
-# Phase 6 - vector store / memory (cut from trimmed scope, kept commented
-# in case it's revisited)
-# chromadb>=0.5
-
-# Search tool backend (Phase 1 stub - not yet wired to Tavily)
-# tavily-python>=0.5
+# Search tool backend
+tavily-python>=0.5

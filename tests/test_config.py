@@ -7,7 +7,7 @@ def test_settings_load_with_defaults(monkeypatch):
     assert s.has_anthropic is True
     assert s.primary_model == "openai/gpt-4o-mini"
     assert s.fallback_model.startswith("anthropic/")
-    assert s.max_tokens == 1000
+    assert s.max_tokens == 4000
 
 
 def test_validate_at_least_one_provider_raises_when_none_set(monkeypatch):

@@ -56,7 +56,7 @@ class Settings(BaseSettings):
     # gpt-4o-mini as default while iterating on phases (cheap, fast).
     # Switch primary_model to an Anthropic model for the final quality pass.
     primary_model: str = "openai/gpt-4o-mini"
-    fallback_model: str = "anthropic/claude-sonnet-4-5"
+    fallback_model: str = "anthropic/claude-sonnet-4-6"
 
     # Ceiling on completion length per agent call. 4000 gives headroom
     # above the most verbose agent observed so far (notebook, ~2925
@@ -78,6 +78,12 @@ class Settings(BaseSettings):
 
     # --- Cost guardrails ---
     max_cost_per_run_usd: float = 2.00
+
+    # --- Phase 4: Reviewer loop ---
+    enable_review: bool = True
+    # How many revision attempts a reviewable agent gets before we accept
+    # its last output as-is rather than looping forever.
+    review_max_attempts: int = 2
 
     @field_validator("workspace_dir", "outputs_dir")
     @classmethod
