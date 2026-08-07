@@ -4,7 +4,7 @@ import pytest
 
 import agents  # noqa: F401 - triggers agent registration
 from agents.base import AgentResult, list_registered_agents
-from agents.orchestrator import REVIEWABLE_AGENTS, Orchestrator, sort_by_pipeline_order
+from agents.orchestrator import REVIEWABLE_AGENTS, Orchestrator, PipelineRun, sort_by_pipeline_order
 from agents.reviewer_agent import ReviewerAgent
 from config import settings
 from models.schemas import CourseOutline, Lesson, PersonaProfile, ReviewVerdict
@@ -101,7 +101,7 @@ def test_run_with_review_approved_on_first_try(monkeypatch):
     orch = Orchestrator()
     agent = _FakeContentAgent()
 
-    result = orch._run_with_review("quiz", agent, {"topic": "x"})
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, PipelineRun(run_id="test"))
 
     assert result.success
     assert agent.calls == 1
@@ -116,7 +116,7 @@ def test_run_with_review_retries_then_approves(monkeypatch):
     orch = Orchestrator()
     agent = _FakeContentAgent()
 
-    result = orch._run_with_review("quiz", agent, {"topic": "x"})
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, PipelineRun(run_id="test"))
 
     assert result.success
     assert agent.calls == 2  # initial attempt + 1 revision
@@ -132,7 +132,7 @@ def test_run_with_review_stops_at_max_attempts_and_keeps_last_output(monkeypatch
     orch = Orchestrator()
     agent = _FakeContentAgent()
 
-    result = orch._run_with_review("quiz", agent, {"topic": "x"})
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, PipelineRun(run_id="test"))
 
     # Never approved, so it stops exactly at review_max_attempts rejections
     # without generating a call beyond that ceiling.
@@ -168,3 +168,80 @@ def test_extract_lesson_respects_lesson_index():
 
 def test_extract_lesson_returns_none_without_curriculum():
     assert Orchestrator._extract_lesson({"topic": "x"}) is None
+
+
+# --- Cost-ceiling-inside-the-loop tests (red-team fix) -----------------------
+
+
+def test_run_with_review_stops_mid_loop_when_run_already_near_ceiling(monkeypatch):
+    # Simulates prior agents in the run having already spent close to the
+    # ceiling - the review loop should refuse to even attempt review once
+    # the initial generation call would push the run over budget, rather
+    # than running the full generation+review+revision cycle first and
+    # only checking afterward.
+    monkeypatch.setattr(settings, "max_cost_per_run_usd", 0.005)
+    monkeypatch.setattr("agents.reviewer_agent.ReviewerAgent", _make_fake_reviewer([True]))
+
+    orch = Orchestrator()
+    agent = _FakeContentAgent()  # costs 0.01 per call, already over the 0.005 ceiling
+    run = PipelineRun(run_id="test")
+    run.total_cost_usd = 0.0
+
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, run)
+
+    assert agent.calls == 1  # generated once, but review was skipped
+    assert result.metadata["review_attempts"] == 0
+    assert result.metadata["review_history"] == []
+
+
+def test_run_with_review_stops_partway_through_revision_cycle_when_ceiling_hit(monkeypatch):
+    # Ceiling allows the first generation + first review, but not a second
+    # full cycle - the loop should stop after detecting this rather than
+    # running every attempt and only checking the total once at the end.
+    monkeypatch.setattr(settings, "max_cost_per_run_usd", 0.02)  # allows ~1 gen + 1 review
+    monkeypatch.setattr("agents.reviewer_agent.ReviewerAgent", _make_fake_reviewer([False, True]))
+
+    orch = Orchestrator()
+    agent = _FakeContentAgent()  # 0.01/call
+    run = PipelineRun(run_id="test")
+    run.total_cost_usd = 0.0
+
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, run)
+
+    # First generation (0.01) + first review (0.005) = 0.015, under 0.02.
+    # Rejected -> triggers a second generation call (cost isn't knowable
+    # until after the call completes), which lands at 0.025 - over the
+    # ceiling - so the loop stops there rather than also calling the
+    # reviewer a second time.
+    assert agent.calls == 2
+    assert result.estimated_cost_usd == pytest.approx(0.01 + 0.005 + 0.01)
+
+
+def test_run_with_review_uses_running_total_from_prior_agents(monkeypatch):
+    # A run that already spent most of its budget on earlier agents
+    # (persona, research, curriculum) should immediately skip review on
+    # a reviewable agent rather than only noticing after spending more.
+    monkeypatch.setattr(settings, "max_cost_per_run_usd", 0.1)
+    monkeypatch.setattr("agents.reviewer_agent.ReviewerAgent", _make_fake_reviewer([True]))
+
+    orch = Orchestrator()
+    agent = _FakeContentAgent()
+    run = PipelineRun(run_id="test")
+    run.total_cost_usd = 0.095  # already close to the 0.1 ceiling from prior agents
+
+    result = orch._run_with_review("quiz", agent, {"topic": "x"}, run)
+
+    assert agent.calls == 1
+    assert result.metadata["review_attempts"] == 0
+    assert result.metadata["review_history"] == []
+
+
+# --- Reviewer model separation (red-team fix) ---------------------------------
+
+
+def test_reviewer_uses_distinct_model_from_default_generator():
+    # The Reviewer must not silently share settings.primary_model - that
+    # defeats the purpose of an independent review (a model grading its
+    # own homework shares its own blind spots).
+    assert ReviewerAgent.preferred_model != settings.primary_model
+    assert ReviewerAgent.preferred_model == settings.reviewer_model

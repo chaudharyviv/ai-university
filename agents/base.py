@@ -237,8 +237,18 @@ class BaseAgent(ABC):
 
             try:
                 cost = litellm.completion_cost(completion_response=response)
-            except Exception:  # noqa: BLE001 - cost calc is best-effort
+                cost_estimation_failed = False
+            except Exception as cost_exc:  # noqa: BLE001 - cost calc itself shouldn't fail the agent
                 cost = 0.0
+                cost_estimation_failed = True
+                logger.warning(
+                    "{}: cost estimation failed for model {} ({}) - this call is being counted as "
+                    "$0.00 toward the cost ceiling, which is NOT accurate. If this happens "
+                    "repeatedly, the cost ceiling is silently not being enforced for this model.",
+                    self.name,
+                    model,
+                    cost_exc,
+                )
 
             content = response.choices[0].message.content
 
@@ -264,7 +274,7 @@ class BaseAgent(ABC):
                         input_tokens=input_tokens,
                         output_tokens=output_tokens,
                         estimated_cost_usd=cost,
-                        metadata={"raw_output": content},
+                        metadata={"raw_output": content, "cost_estimation_failed": cost_estimation_failed},
                     )
 
             if i > 0:
@@ -289,7 +299,7 @@ class BaseAgent(ABC):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 estimated_cost_usd=cost,
-                metadata={"failed_over": i > 0},
+                metadata={"failed_over": i > 0, "cost_estimation_failed": cost_estimation_failed},
             )
 
         # Unreachable in practice (the loop above always returns or raises

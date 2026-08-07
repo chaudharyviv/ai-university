@@ -17,7 +17,7 @@ from typing import Any
 
 from loguru import logger
 
-from agents.base import AgentResult, get_agent_class
+from agents.base import AgentResult, get_agent_class, list_registered_agents
 from config import settings
 from tools.filesystem import get_run_dir, new_run_id
 
@@ -112,6 +112,15 @@ class Orchestrator:
         """
         run_id = run_id or new_run_id()
         enable_review = settings.enable_review if enable_review is None else enable_review
+
+        unknown = [a for a in agent_names if a not in list_registered_agents()]
+        if unknown:
+            raise ValueError(
+                f"Unknown agent name(s): {unknown}. Registered agents: {list_registered_agents()}. "
+                "This is checked up front so a typo fails immediately instead of running everything "
+                "else first and only failing when the pipeline reaches it."
+            )
+
         agent_names = sort_by_pipeline_order(agent_names)
         get_run_dir(run_id)  # ensure workspace exists
         context: dict[str, Any] = dict(initial_context or {})
@@ -129,7 +138,7 @@ class Orchestrator:
             agent = agent_cls()
 
             if enable_review and agent_name in REVIEWABLE_AGENTS:
-                result = self._run_with_review(agent_name, agent, context)
+                result = self._run_with_review(agent_name, agent, context, run)
             else:
                 result = agent.run(**context)
 
@@ -138,16 +147,22 @@ class Orchestrator:
 
             if run.total_cost_usd > settings.max_cost_per_run_usd:
                 run.stopped_early = True
+                completed = [r.agent_name for r in run.results if r.success]
                 run.stop_reason = (
                     f"Cost ceiling exceeded: ${run.total_cost_usd:.4f} > "
-                    f"${settings.max_cost_per_run_usd:.2f}"
+                    f"${settings.max_cost_per_run_usd:.2f}. "
+                    f"{len(completed)} agent(s) completed successfully before stopping: {completed}."
                 )
                 logger.warning("Run {} stopped: {}", run_id, run.stop_reason)
                 break
 
             if not result.success:
                 run.stopped_early = True
-                run.stop_reason = f"Agent {agent_name!r} failed: {result.error}"
+                completed = [r.agent_name for r in run.results if r.success]
+                run.stop_reason = (
+                    f"Agent {agent_name!r} failed: {result.error}. "
+                    f"{len(completed)} agent(s) completed successfully before this: {completed}."
+                )
                 logger.warning("Run {} stopped: {}", run_id, run.stop_reason)
                 break
 
@@ -176,11 +191,20 @@ class Orchestrator:
             lesson_index = 0
         return course.lessons[lesson_index]
 
-    def _run_with_review(self, agent_name: str, agent: Any, context: dict[str, Any]) -> AgentResult:
+    def _run_with_review(
+        self, agent_name: str, agent: Any, context: dict[str, Any], run: "PipelineRun"
+    ) -> AgentResult:
         """
         Run `agent`, then have the Reviewer agent check its output.
         If rejected, re-run `agent` with the reviewer's feedback, up to
         settings.review_max_attempts times.
+
+        Cost ceiling (Phase 6 red-team fix): checked after EVERY LLM call
+        inside this loop (generation and review both), not just once the
+        whole loop returns - a stuck reject/regenerate cycle can no longer
+        blow past settings.max_cost_per_run_usd before anyone notices,
+        since the ceiling used to only be checked between top-level agents
+        while this loop could make 2*(review_max_attempts+1) calls first.
 
         Returns the final AgentResult with combined cost across every
         generation + review call, and review history recorded in
@@ -194,11 +218,24 @@ class Orchestrator:
         lesson = self._extract_lesson(context)
         persona = context.get("persona")
 
+        def _over_budget(cost_so_far: float) -> bool:
+            return (run.total_cost_usd + cost_so_far) > settings.max_cost_per_run_usd
+
         result = agent.run(**context)
         total_cost = result.estimated_cost_usd
         review_history: list[dict[str, Any]] = []
-
         attempt = 0
+
+        if _over_budget(total_cost):
+            logger.warning(
+                "{}: cost ceiling reached after initial generation (${:.4f} run total) - skipping review",
+                agent_name,
+                run.total_cost_usd + total_cost,
+            )
+            result.estimated_cost_usd = total_cost
+            result.metadata = {**result.metadata, "review_history": [], "review_attempts": 0}
+            return result
+
         while result.success and attempt < settings.review_max_attempts:
             review_result = reviewer.run(
                 target_agent_name=agent_name,
@@ -207,6 +244,16 @@ class Orchestrator:
                 persona=persona,
             )
             total_cost += review_result.estimated_cost_usd
+
+            if _over_budget(total_cost):
+                logger.warning(
+                    "{}: cost ceiling reached after review call (${:.4f} run total) - stopping loop",
+                    agent_name,
+                    run.total_cost_usd + total_cost,
+                )
+                if review_result.success:
+                    review_history.append(review_result.output.model_dump())
+                break
 
             if not review_result.success:
                 # Reviewer itself couldn't produce a valid verdict - accept
@@ -247,6 +294,14 @@ class Orchestrator:
                 previous_output=result.output.model_dump(),
             )
             total_cost += result.estimated_cost_usd
+
+            if _over_budget(total_cost):
+                logger.warning(
+                    "{}: cost ceiling reached after revision generation (${:.4f} run total) - stopping loop",
+                    agent_name,
+                    run.total_cost_usd + total_cost,
+                )
+                break
 
         result.estimated_cost_usd = total_cost
         result.metadata = {

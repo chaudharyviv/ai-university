@@ -196,3 +196,76 @@ def test_research_agent_falls_back_when_primary_raises(both_providers, monkeypat
     assert models_used == [PRIMARY, FALLBACK]
     assert result.model_used == FALLBACK
     assert result.metadata.get("failed_over") is True
+
+
+# --- Cost-estimation-failure visibility (red-team fix) -----------------------
+
+
+def test_cost_estimation_failure_is_surfaced_not_silently_swallowed(monkeypatch, both_providers):
+    # If litellm.completion_cost() itself raises (e.g. unpriced model),
+    # the call must still succeed with cost=0.0, but this must be visible
+    # in metadata rather than silently indistinguishable from "this call
+    # genuinely cost nothing" - the latter would let the cost ceiling be
+    # bypassed with no way to notice.
+    monkeypatch.setattr("agents.base.litellm.completion", lambda **kw: _fake_response(VALID_PERSONA_JSON))
+
+    def broken_cost(completion_response):
+        raise RuntimeError("model not in pricing table")
+
+    monkeypatch.setattr("agents.base.litellm.completion_cost", broken_cost)
+
+    agent = PersonaAgent()
+    result = agent.run(topic="Intro to Rust")
+
+    assert result.success is True
+    assert result.estimated_cost_usd == 0.0
+    assert result.metadata.get("cost_estimation_failed") is True
+
+
+def test_cost_estimation_success_sets_flag_false(monkeypatch, both_providers):
+    monkeypatch.setattr("agents.base.litellm.completion", lambda **kw: _fake_response(VALID_PERSONA_JSON))
+    monkeypatch.setattr("agents.base.litellm.completion_cost", lambda completion_response: 0.002)
+
+    agent = PersonaAgent()
+    result = agent.run(topic="Intro to Rust")
+
+    assert result.estimated_cost_usd == 0.002
+    assert result.metadata.get("cost_estimation_failed") is False
+
+
+# --- smolagents monitor API guard (red-team fix) -----------------------------
+
+
+def test_research_agent_degrades_gracefully_when_monitor_api_missing(monkeypatch, both_providers):
+    # Simulates a smolagents version where .monitor.get_total_token_counts()
+    # no longer exists / raises AttributeError - the whole agent must not
+    # crash over a cost-tracking nicety, it should degrade to 0 tokens.
+    VALID_RESEARCH_JSON = (
+        '{"topic": "Rust", "findings": [], "summary": "Rust is a systems language."}'
+    )
+
+    class BrokenMonitor:
+        def get_total_token_counts(self):
+            raise AttributeError("monitor API changed in this smolagents version")
+
+    class FakeLiteLLMModel:
+        def __init__(self, model_id, max_tokens=None):
+            self.model_id = model_id
+
+    class FakeToolCallingAgent:
+        def __init__(self, tools, model, max_steps, instructions):
+            self.model = model
+            self.monitor = BrokenMonitor()
+
+        def run(self, prompt):
+            return VALID_RESEARCH_JSON
+
+    monkeypatch.setattr("agents.research_agent.LiteLLMModel", FakeLiteLLMModel)
+    monkeypatch.setattr("agents.research_agent.ToolCallingAgent", FakeToolCallingAgent)
+
+    agent = ResearchAgent()
+    result = agent.run(topic="Rust")
+
+    assert result.success is True
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0

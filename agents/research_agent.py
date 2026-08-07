@@ -123,9 +123,23 @@ class ResearchAgent(BaseAgent):
 
             # Got a response - parse/validate here; do not failover on schema errors.
             elapsed = time.monotonic() - start
-            token_usage = smol_agent.monitor.get_total_token_counts()
-            input_tokens = token_usage.input_tokens
-            output_tokens = token_usage.output_tokens
+            try:
+                token_usage = smol_agent.monitor.get_total_token_counts()
+                input_tokens = token_usage.input_tokens
+                output_tokens = token_usage.output_tokens
+            except AttributeError as monitor_exc:
+                # smolagents is on a loose version pin (>=1.3) and has
+                # changed its monitor API before - token/cost tracking
+                # degrading gracefully to zero is far better than this
+                # whole agent crashing over a cost-tracking nicety.
+                logger.warning(
+                    "{}: smolagents monitor API unavailable ({}) - token/cost tracking "
+                    "degraded to 0 for this call, but the agent result itself is unaffected",
+                    self.name,
+                    monitor_exc,
+                )
+                input_tokens = 0
+                output_tokens = 0
 
             # smolagents doesn't compute cost itself; estimate via litellm
             # using the same per-token pricing table the rest of the app uses.
@@ -138,8 +152,17 @@ class ResearchAgent(BaseAgent):
                     completion_tokens=output_tokens,
                 )
                 estimated_cost = sum(cost) if isinstance(cost, tuple) else 0.0
-            except Exception:  # noqa: BLE001 - cost estimation is best-effort
+                cost_estimation_failed = False
+            except Exception as cost_exc:  # noqa: BLE001 - cost calc itself shouldn't fail the agent
                 estimated_cost = 0.0
+                cost_estimation_failed = True
+                logger.warning(
+                    "{}: cost estimation failed for model {} ({}) - this call is being counted "
+                    "as $0.00 toward the cost ceiling, which is NOT accurate.",
+                    self.name,
+                    model_id,
+                    cost_exc,
+                )
 
             try:
                 parsed_dict = extract_json(str(raw_result))
@@ -160,7 +183,11 @@ class ResearchAgent(BaseAgent):
                     input_tokens=input_tokens,
                     output_tokens=output_tokens,
                     estimated_cost_usd=estimated_cost,
-                    metadata={"raw_output": str(raw_result), "failed_over": i > 0},
+                    metadata={
+                        "raw_output": str(raw_result),
+                        "failed_over": i > 0,
+                        "cost_estimation_failed": cost_estimation_failed,
+                    },
                 )
 
             if i > 0:
@@ -185,7 +212,7 @@ class ResearchAgent(BaseAgent):
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 estimated_cost_usd=estimated_cost,
-                metadata={"failed_over": i > 0},
+                metadata={"failed_over": i > 0, "cost_estimation_failed": cost_estimation_failed},
             )
 
         elapsed = time.monotonic() - start

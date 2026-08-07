@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-import agents  # noqa: F401 - triggers agent registration
+import agents 
 from agents.base import list_registered_agents
 from config import settings
 from utils.logging_config import configure_logging

@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     primary_model: str = "openai/gpt-4o-mini"
     fallback_model: str = "anthropic/claude-sonnet-4-6"
 
+    # Reviewer intentionally uses a different model than the generator
+    # (Phase 6 red-team fix): a model reviewing its own output tends to
+    # share its own blind spots. Haiku is cheap enough to not undermine
+    # the cost story while being a genuinely distinct model family/provider
+    # from the gpt-4o-mini default generator.
+    reviewer_model: str = "anthropic/claude-haiku-4-5"
+
     # Ceiling on completion length per agent call. 4000 gives headroom
     # above the most verbose agent observed so far (notebook, ~2925
     # output tokens on a real run) without being wasteful on short

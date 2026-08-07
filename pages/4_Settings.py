@@ -20,7 +20,7 @@ st.json(
         "openai_key_configured": settings.has_openai,
         "workspace_dir": str(settings.workspace_dir),
         "outputs_dir": str(settings.outputs_dir),
-        "database_url": settings.database_url,
+        "database_configured": bool(settings.database_url),
         "max_cost_per_run_usd": settings.max_cost_per_run_usd,
     }
 )

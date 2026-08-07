@@ -8,6 +8,7 @@ never collide and cleanup is a single `rm -rf <run_dir>`.
 
 from __future__ import annotations
 
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -15,6 +16,20 @@ from pathlib import Path
 from loguru import logger
 
 from config import settings
+
+# Matches uuid.hex[:12]-style ids from new_run_id(); rejects path
+# separators / traversal. Single source of truth - tools/export.py
+# imports this rather than duplicating it, so the two can't drift.
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_run_id(run_id: str) -> str:
+    if not _SAFE_RUN_ID.fullmatch(run_id):
+        raise ValueError(
+            f"Invalid run_id {run_id!r}: must be 1-64 chars of [A-Za-z0-9_-] "
+            "(no path separators or '..')"
+        )
+    return run_id
 
 
 def new_run_id() -> str:
@@ -29,7 +44,13 @@ def get_run_dir(run_id: str, create: bool = True) -> Path:
     Args:
         run_id: identifier returned by `new_run_id()`.
         create: if True, create the directory (and parents) if missing.
+
+    Raises ValueError if run_id isn't a safe path component (this used
+    to be unvalidated here - export.py had the check, this didn't,
+    which was an inconsistency: cleanup_run() could be handed a
+    traversal payload with no guard).
     """
+    run_id = validate_run_id(run_id)
     run_dir = settings.workspace_dir / run_id
     if create:
         run_dir.mkdir(parents=True, exist_ok=True)

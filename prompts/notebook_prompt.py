@@ -21,7 +21,9 @@ Rules:
 - Alternate markdown (explanation) and code (runnable example / exercise)
   cells. Start with a markdown cell introducing the lesson.
 - Code cells must be plain, valid, runnable Python - no shell commands,
-  no pip installs, no undefined variables carried in from elsewhere.
+  no pip installs, no undefined variables carried in from elsewhere, and
+  no filesystem writes/deletes, network requests, or subprocess execution -
+  this notebook is downloaded and run by learners without review.
 - Cover every objective for this lesson in at least one cell.
 - 6-12 cells total.
 - If a target audience is provided (audience_level, tone), match the

@@ -1,0 +1,35 @@
+# Secrets - never bake these into an image layer
+.env
+.env.*
+!.env.example
+
+# Version control
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# App data - generated at runtime, not part of the image
+workspace/*
+!workspace/.gitkeep
+outputs/*
+!outputs/.gitkeep
+*.db
+
+# OS
+.DS_Store
+
+# Docs/CI not needed inside the container
+.github/
+README.md

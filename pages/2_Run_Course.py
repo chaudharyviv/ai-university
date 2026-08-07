@@ -6,6 +6,7 @@ import agents  # noqa: F401 - triggers agent registration
 from agents.base import list_registered_agents
 from agents.orchestrator import REVIEWABLE_AGENTS, Orchestrator, sort_by_pipeline_order
 from config import settings
+from models.persona_archetypes import PERSONA_ARCHETYPE_OPTIONS
 from tools.export import export_run
 
 st.set_page_config(page_title="Run Course", page_icon="▶️", layout="wide")
@@ -18,9 +19,7 @@ registered = [a for a in list_registered_agents() if a != "reviewer"]
 
 if not registered:
     st.warning(
-        "No agents are registered yet, so there's nothing to run. "
-        "This page will come alive in Phase 2 once Persona/Research/"
-        "Curriculum/Notebook agents exist."
+        "No agents are registered yet, so there's nothing to run."
     )
     st.stop()
 
@@ -29,7 +28,14 @@ if not registered:
 # pick agents in a broken order.
 display_order = sort_by_pipeline_order(registered)
 
-topic = st.text_input("Course topic", placeholder="e.g. Introduction to Bayesian Statistics")
+topic = st.text_input("Course topic", placeholder="e.g. Introduction to Machine Learning")
+persona_archetype = st.selectbox(
+    "Target audience",
+    options=PERSONA_ARCHETYPE_OPTIONS,
+    help="Fixed archetypes hardcode audience level and tone for reproducible runs - only "
+    "prerequisites/learning goals are still generated per-topic. 'Custom' lets the Persona "
+    "agent infer everything from the topic, as before (results may vary run to run).",
+)
 selected_agents = st.multiselect(
     "Agents to run",
     options=display_order,
@@ -38,7 +44,7 @@ selected_agents = st.multiselect(
     "notebook) regardless of the order you select them in.",
 )
 enable_review = st.checkbox(
-    "Enable reviewer loop (Phase 4)",
+    "Enable reviewer loop",
     value=settings.enable_review,
     help=f"Notebook/Code/Diagram/Quiz/Assignment/Speaker Notes get reviewed and, if rejected, "
     f"re-generated with feedback (up to {settings.review_max_attempts} attempts). Adds extra "
@@ -50,7 +56,7 @@ if st.button("Run pipeline", type="primary", disabled=not (topic and selected_ag
         orchestrator = Orchestrator()
         run = orchestrator.run_pipeline(
             agent_names=selected_agents,
-            initial_context={"topic": topic},
+            initial_context={"topic": topic, "persona_archetype": persona_archetype},
             enable_review=enable_review,
         )
     # Stored in session_state (not a local var) so the export section below

@@ -21,6 +21,10 @@ Rules:
 - solution_code must be a complete, correct, runnable solution to the
   matching prompt.
 - Escape all newlines and special characters properly for valid JSON.
+- starter_code and solution_code must never perform filesystem writes/deletes,
+  network requests, subprocess/shell execution, or install packages -
+  these are downloaded and run by learners, so keep them self-contained
+  and safe to execute without review.
 - If a target audience is provided (audience_level, tone), calibrate
   exercise difficulty and the wording of `prompt` to that level. If no
   audience is provided, default to a generally accessible intermediate

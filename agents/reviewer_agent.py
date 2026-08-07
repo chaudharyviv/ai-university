@@ -17,6 +17,7 @@ import json
 from typing import Any
 
 from agents.base import BaseAgent, register_agent
+from config import settings
 from models.schemas import ReviewVerdict
 from prompts.reviewer_prompt import REVIEWER_SYSTEM_PROMPT
 
@@ -26,6 +27,10 @@ class ReviewerAgent(BaseAgent):
     name = "reviewer"
     system_prompt = REVIEWER_SYSTEM_PROMPT
     response_model = ReviewVerdict
+    # Deliberately NOT settings.primary_model - see config.py's
+    # reviewer_model docstring. A reviewer sharing the generator's model
+    # tends to share its blind spots; this keeps them structurally distinct.
+    preferred_model = settings.reviewer_model
 
     def build_user_prompt(self, **kwargs: Any) -> str:
         target_agent_name = kwargs.get("target_agent_name")
